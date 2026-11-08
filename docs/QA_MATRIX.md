@@ -5,7 +5,8 @@ The GitHub Actions Python checks and Intel packaging workflow do **not** verify 
 | Feature | Automated verification | Manual verification still needed |
 | --- | --- | --- |
 | Packet normalization | Unit tests | Different real Meshtastic firmware packet shapes |
-| 5,000-row packet window | Headless UI regression tests | Long capture responsiveness |
+| 5,000-row packet window | Headless tests: tallies vs full recount after rollover, per-packet cost at cap, batching | `scripts/soak_test.py` on the Intel Mac (CPU, memory, UI lag) |
+| Diagnostics and log file | Headless tests: session summary, event list, log rotation | Copy Diagnostics paste, Open Log Folder in Finder |
 | Search and node filter | Headless UI regression tests | Keyboard and mouse behavior on Intel Mac |
 | Copy Node ID | Headless clipboard test | macOS clipboard integration |
 | CSV exports | Syntax/GUI smoke checks | Export paths, permissions, filtered contents |

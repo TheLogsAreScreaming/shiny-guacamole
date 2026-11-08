@@ -18,7 +18,9 @@ This app monitors packet information exposed by a Meshtastic radio over Wi-Fi/TC
 - [ ] Confirm live packets, metadata, disconnect, and reconnect behavior
 - [ ] Interrupt Wi-Fi/network and verify whether an established TCP session detects loss
 - [ ] Reconnect and quit the app without hangs or duplicate packets
-- [ ] Test a long capture and the 5,000-row retention limit
+- [ ] Test a long capture and the 5,000-row retention limit: `python scripts/soak_test.py --minutes 30 --rate 20` (memory flat after the cap, UI lag well under 100 ms)
+- [ ] Leave the app in the background for several minutes during the soak and check for multi-second stalls (possible macOS App Nap)
+- [ ] After a radio drop, use **Copy Diagnostics** and **Open Log Folder** and confirm the events are recorded
 
 ## Release gate
 - [ ] Resolve critical bugs and document remaining limitations

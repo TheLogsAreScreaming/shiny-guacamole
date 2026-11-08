@@ -1,12 +1,18 @@
 import csv
+import logging
+import platform
+from collections import deque
+from logging.handlers import RotatingFileHandler
 import random
 import socket
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal, QTimer, QSettings
+from PySide6.QtCore import QThread, Signal, QTimer, QSettings, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QTableWidget,
@@ -23,6 +29,53 @@ def packet_row(packet):
         "rssi": str(packet.get("rxRssi") if packet.get("rxRssi") is not None else ""),
         "snr": str(packet.get("rxSnr") if packet.get("rxSnr") is not None else ""),
     }
+
+
+APP_NAME = "Meshtastic Sniffer TCP"
+log = logging.getLogger("sniffer")
+
+
+def default_log_dir():
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / APP_NAME
+    return Path.home() / ".meshtastic-sniffer-tcp" / "logs"
+
+
+def configure_logging(log_dir=None, max_bytes=512 * 1024, backups=3):
+    """Write app and Meshtastic library warnings to a small rotating log file.
+
+    Returns the log file path, or None if the directory cannot be created (the
+    app keeps working without a file log).
+    """
+    log_dir = Path(log_dir) if log_dir else default_log_dir()
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "app.log"
+        handler = RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+    except OSError:
+        return None
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    # The library logs every reconnect and reader error; keep warnings and up.
+    logging.getLogger("meshtastic").setLevel(logging.WARNING)
+    return path
+
+
+def package_version(name):
+    try:
+        from importlib.metadata import version
+        return version(name)
+    except Exception:
+        return "not installed"
+
+
+def format_duration(seconds):
+    seconds = int(max(0, seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours:d}:{minutes:02d}:{secs:02d}"
 
 
 RECEIVE_TOPIC = "meshtastic.receive"
@@ -174,6 +227,33 @@ class MainWindow(QMainWindow):
         self.rows = []
         self.seen_nodes = set()
         self.port_counts = {}
+        self.node_counts = {}
+        self.node_refresh_pending = False
+        self.node_refresh_timer = QTimer(self)
+        self.node_refresh_timer.setSingleShot(True)
+        self.node_refresh_timer.setInterval(300)
+        self.node_refresh_timer.timeout.connect(self._node_refresh_tick)
+        self.pending_packets = []
+        self.flush_timer = QTimer(self)
+        self.flush_timer.setSingleShot(True)
+        self.flush_timer.setInterval(200)
+        self.flush_timer.timeout.connect(self.flush_packets)
+        self.scroll_timer = QTimer(self)
+        self.scroll_timer.setSingleShot(True)
+        self.scroll_timer.setInterval(150)
+        self.scroll_timer.timeout.connect(self._scroll_to_latest)
+        self.last_packet_at = None
+        self.session_packets = 0
+        self.session_started = None
+        self.has_connected = False
+        self.reconnects = 0
+        self.last_drop = ""
+        self.connection_events = deque(maxlen=50)
+        self.log_path = None
+        self.diagnostics_timer = QTimer(self)
+        self.diagnostics_timer.setInterval(1000)
+        self.diagnostics_timer.timeout.connect(self.refresh_diagnostics)
+        self.diagnostics_timer.start()
         self.radio = None
         self.retry_count = 0
         self.max_retries = MAX_RECONNECT_ATTEMPTS
@@ -214,6 +294,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status)
         self.stats = QLabel("Packets: 0  |  Nodes: 0  |  Message types: 0")
         layout.addWidget(self.stats)
+        self.diagnostics = QLabel()
+        self.diagnostics.setObjectName("diagnostics")
+        self.diagnostics.setWordWrap(True)
+        layout.addWidget(self.diagnostics)
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText("Filter packets by node ID or message type...")
         self.filter_input.textChanged.connect(self.apply_filter)
@@ -244,41 +328,128 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter)
         layout.addWidget(self.packet_details)
-        layout.addWidget(self.copy_node_btn)
+        bottom = QHBoxLayout()
+        self.copy_diagnostics_btn = QPushButton("Copy Diagnostics")
+        self.copy_diagnostics_btn.clicked.connect(self.copy_diagnostics)
+        self.open_logs_btn = QPushButton("Open Log Folder")
+        self.open_logs_btn.clicked.connect(self.open_log_folder)
+        for item in (self.copy_node_btn, self.copy_diagnostics_btn, self.open_logs_btn):
+            bottom.addWidget(item)
+        layout.addLayout(bottom)
+        self.refresh_diagnostics()
+
+    def _count_packet(self, data, delta):
+        """Keep node and port tallies in step with self.rows without rescanning it."""
+        node = data.get("from")
+        if node:
+            count = self.node_counts.get(node, 0) + delta
+            if count > 0:
+                self.node_counts[node] = count
+                self.seen_nodes.add(node)
+            else:
+                self.node_counts.pop(node, None)
+                self.seen_nodes.discard(node)
+        kind = data.get("type") or "UNKNOWN"
+        count = self.port_counts.get(kind, 0) + delta
+        if count > 0:
+            self.port_counts[kind] = count
+        else:
+            self.port_counts.pop(kind, None)
+
+    def _update_stats(self):
+        self.stats.setText(f"Packets: {len(self.rows)}  |  Nodes: {len(self.seen_nodes)}  |  Message types: {len(self.port_counts)}")
+
+    def _row_matches_filter(self, packet, query):
+        if not query:
+            return True
+        searchable = " ".join(str(packet.get(key, "")) for key in ("from", "type")).casefold()
+        return query in searchable
 
     def add_packet(self, data):
+        # Every step here is O(1) in the size of the log (the node table is
+        # refreshed on a short timer), so a full 5,000-row history costs the
+        # same per packet as an empty one.
         self.rows.append(data)
+        self._count_packet(data, +1)
+        self.last_packet_at = time.monotonic()
         if len(self.rows) > self.max_packets:
-            self.rows.pop(0)
+            self._count_packet(self.rows.pop(0), -1)
             self.table.removeRow(0)
-            if hasattr(self, "packet_details"):
-                self.packet_details.clear()
-            self.seen_nodes = {row["from"] for row in self.rows if row.get("from")}
-            self.port_counts = {}
-            for row in self.rows[:-1]:
-                kind = row.get("type") or "UNKNOWN"
-                self.port_counts[kind] = self.port_counts.get(kind, 0) + 1
-        if data.get("from"):
-            self.seen_nodes.add(data["from"])
-        kind = data.get("type") or "UNKNOWN"
-        self.port_counts[kind] = self.port_counts.get(kind, 0) + 1
-        self.stats.setText(f"Packets: {len(self.rows)}  |  Nodes: {len(self.seen_nodes)}  |  Message types: {len(self.port_counts)}")
+            self.packet_details.clear()
+        self._update_stats()
         row = self.table.rowCount()
         self.table.insertRow(row)
         for col, key in enumerate(("time", "from", "type", "rssi", "snr")):
             self.table.setItem(row, col, QTableWidgetItem(data.get(key, "")))
-        self.refresh_nodes()
-        self.apply_filter()
-        if hasattr(self, "packet_details") and self.table.currentRow() >= 0:
+        query = self.filter_input.text().strip().casefold()
+        if query:
+            self.table.setRowHidden(row, not self._row_matches_filter(data, query))
+        self.schedule_node_refresh()
+        if self.table.currentRow() >= 0:
             self.show_packet_details()
+        if not self.display_paused and not self.scroll_timer.isActive():
+            # scrollToBottom forces a layout of the whole table; doing it on
+            # every packet made a full history cost ~100 ms per packet.
+            self.scroll_timer.start()
+
+    def queue_packet(self, data):
+        """Buffer a live packet; the UI applies buffered packets every 200 ms.
+
+        A full window redraw costs tens of milliseconds on macOS, so redrawing
+        once per packet capped throughput at ~25 packets/s and froze the UI.
+        """
+        self.pending_packets.append(data)
+        self.session_packets += 1
+        self.last_packet_at = time.monotonic()
+        if not self.flush_timer.isActive():
+            self.flush_timer.start()
+
+    def flush_packets(self):
+        batch, self.pending_packets = self.pending_packets, []
+        if not batch:
+            return
+        self.table.setUpdatesEnabled(False)
+        try:
+            for data in batch:
+                self.add_packet(data)
+        finally:
+            self.table.setUpdatesEnabled(True)
+
+    def _scroll_to_latest(self):
         if not self.display_paused:
             self.table.scrollToBottom()
+
+    def schedule_node_refresh(self):
+        """Refresh the node table now, then at most every 300 ms while packets stream in."""
+        if self.node_refresh_timer.isActive():
+            self.node_refresh_pending = True
+        else:
+            self.refresh_nodes()
+            self.node_refresh_timer.start()
+
+    def _node_refresh_tick(self):
+        if self.node_refresh_pending:
+            self.node_refresh_pending = False
+            self.refresh_nodes()
+            self.node_refresh_timer.start()
 
     def on_radio_status(self, message):
         self.status.setText(message)
 
+    def record_event(self, message, level=logging.INFO):
+        """Remember a connection event for Copy Diagnostics and write it to the log."""
+        self.connection_events.append((datetime.now().strftime("%Y-%m-%d %H:%M:%S"), message))
+        log.log(level, message)
+
     def _on_radio_connected(self, host):
+        if self.has_connected:
+            self.reconnects += 1
+        self.has_connected = True
         self.retry_count = 0
+        self.session_started = time.monotonic()
+        self.session_packets = 0
+        self.record_event("Connected to " + host)
+        self.refresh_diagnostics()
 
     def _radio_finished(self):
         radio = self.sender()
@@ -287,6 +458,13 @@ class MainWindow(QMainWindow):
             self.connect_btn.setEnabled(True)
             reason = getattr(radio, "end_reason", "stopped")
             detail = getattr(radio, "end_detail", "")
+            self.session_started = None
+            if reason == "lost":
+                self.last_drop = f"{datetime.now().strftime('%H:%M:%S')} {detail}"
+            self.record_event(
+                f"Session ended ({reason}){': ' + detail if detail else ''}",
+                logging.WARNING if reason != "stopped" else logging.INFO,
+            )
             if reason in ("failed", "lost") and self.reconnect_enabled:
                 self._schedule_reconnect(reason, detail)
             elif reason == "failed":
@@ -302,6 +480,7 @@ class MainWindow(QMainWindow):
         self.retry_count += 1
         if self.retry_count > self.max_retries:
             self.reconnect_enabled = False
+            self.record_event(f"Gave up reconnecting after {self.max_retries} attempts", logging.WARNING)
             self.status.setText(
                 f"✕ {label}: {detail} — gave up after {self.max_retries} attempts. "
                 "Select Connect TCP to try again."
@@ -309,6 +488,7 @@ class MainWindow(QMainWindow):
             return
         delay = reconnect_delay_ms(self.retry_count)
         self.retry_timer.start(delay)
+        self.record_event(f"Reconnect attempt {self.retry_count}/{self.max_retries} in {delay // 1000}s")
         self.status.setText(
             f"◌ {label}: {detail} — reconnecting in {delay // 1000}s "
             f"(attempt {self.retry_count}/{self.max_retries})"
@@ -331,6 +511,9 @@ class MainWindow(QMainWindow):
             self.status.setText("Disconnect the current radio before connecting again.")
             return
         self.retry_count = 0
+        self.has_connected = False
+        self.reconnects = 0
+        self.last_drop = ""
         self._start_radio(host)
 
     def _start_radio(self, host):
@@ -340,23 +523,78 @@ class MainWindow(QMainWindow):
         self.reconnect_host = host
         self.settings.setValue("radio_host", host)
         self.radio = self.radio_factory(host, self)
-        self.radio.packet.connect(self.add_packet)
+        self.radio.packet.connect(self.queue_packet)
         self.radio.status.connect(self.on_radio_status)
         self.radio.connected.connect(self._on_radio_connected)
         self.radio.finished.connect(self._radio_finished)
         self.connect_btn.setEnabled(False)
         self.status.setText("◌ Connecting to radio...")
+        self.record_event("Connecting to " + host)
         self.radio.start()
 
     def disconnect_radio(self):
         self.reconnect_enabled = False
         self.retry_timer.stop()
         self.retry_count = 0
+        if self.radio is not None or self.reconnect_host:
+            self.record_event("Disconnect requested by user")
         if self.radio is not None:
             self.radio.stop()
             self.status.setText("◌ Disconnecting...")
         elif not self.demo.isActive():
             self.status.setText("● Disconnected")
+
+    def session_summary(self):
+        """One-line health summary for the live connection (empty when idle)."""
+        now = time.monotonic()
+        parts = []
+        if self.session_started is not None:
+            parts.append("Session up " + format_duration(now - self.session_started))
+            parts.append(f"{self.session_packets} packets this session")
+            if self.last_packet_at is None or self.last_packet_at < self.session_started:
+                parts.append("no packets yet")
+            else:
+                parts.append("last packet " + format_duration(now - self.last_packet_at) + " ago")
+        elif self.retry_timer.isActive():
+            parts.append("Waiting to reconnect")
+        if self.reconnects:
+            parts.append(f"reconnects: {self.reconnects}")
+        if self.last_drop:
+            parts.append("last drop: " + self.last_drop)
+        return "  |  ".join(parts)
+
+    def refresh_diagnostics(self):
+        text = self.session_summary()
+        self.diagnostics.setText(text)
+        self.diagnostics.setVisible(bool(text))
+
+    def diagnostics_report(self):
+        lines = [
+            f"{APP_NAME} diagnostics",
+            f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+            f"macOS/platform: {platform.platform()} ({platform.machine()})",
+            f"Python: {platform.python_version()}",
+            f"PySide6: {package_version('PySide6')}  meshtastic: {package_version('meshtastic')}",
+            f"Radio host: {self.reconnect_host or self.host.text().strip() or '(none)'}",
+            f"Status: {self.status.text()}",
+            f"Session: {self.session_summary() or 'not connected'}",
+            f"Packets in log: {len(self.rows)} (limit {self.max_packets}), nodes: {len(self.seen_nodes)}",
+            f"Log file: {self.log_path or 'not enabled'}",
+            "",
+            "Recent connection events:",
+        ]
+        lines += [f"  {stamp}  {message}" for stamp, message in self.connection_events] or ["  (none)"]
+        return "\n".join(lines)
+
+    def copy_diagnostics(self):
+        QApplication.clipboard().setText(self.diagnostics_report())
+        self.status.setText("Copied diagnostics to clipboard")
+
+    def open_log_folder(self):
+        if self.log_path is None:
+            QMessageBox.information(self, "Logging unavailable", "The log file could not be created on this Mac.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.log_path).parent)))
 
     def toggle_demo(self):
         if self.demo.isActive():
@@ -384,7 +622,7 @@ class MainWindow(QMainWindow):
         index = self.table.currentRow()
         if 0 <= index < len(self.rows):
             packet = self.rows[index]
-            self.packet_details.setPlainText("\\n".join(f"{key}: {packet.get(key, '')}" for key in ("time", "from", "type", "rssi", "snr")))
+            self.packet_details.setPlainText("\n".join(f"{key}: {packet.get(key, '')}" for key in ("time", "from", "type", "rssi", "snr")))
         else:
             self.packet_details.clear()
 
@@ -401,21 +639,25 @@ class MainWindow(QMainWindow):
             self.status.setText("Copied node ID: " + item.text())
 
     def refresh_nodes(self):
-        counts = {}
-        for packet in self.rows:
-            node = packet.get("from")
-            if node:
-                counts[node] = counts.get(node, 0) + 1
-        self.node_table.setRowCount(len(counts))
-        for row, (node, count) in enumerate(sorted(counts.items(), key=lambda item: -item[1])):
-            self.node_table.setItem(row, 0, QTableWidgetItem(node))
-            self.node_table.setItem(row, 1, QTableWidgetItem(str(count)))
+        self.node_refresh_pending = False
+        ordered = sorted(self.node_counts.items(), key=lambda item: -item[1])
+        self.node_table.setUpdatesEnabled(False)
+        try:
+            self.node_table.setRowCount(len(ordered))
+            for row, (node, count) in enumerate(ordered):
+                for col, text in ((0, node), (1, str(count))):
+                    item = self.node_table.item(row, col)
+                    if item is None:
+                        self.node_table.setItem(row, col, QTableWidgetItem(text))
+                    elif item.text() != text:
+                        item.setText(text)
+        finally:
+            self.node_table.setUpdatesEnabled(True)
 
     def apply_filter(self):
         query = self.filter_input.text().strip().casefold()
         for index, packet in enumerate(self.rows):
-            searchable = " ".join(str(packet.get(key, "")) for key in ("from", "type")).casefold()
-            self.table.setRowHidden(index, bool(query) and query not in searchable)
+            self.table.setRowHidden(index, not self._row_matches_filter(packet, query))
 
     def toggle_pause(self):
         self.display_paused = not self.display_paused
@@ -427,6 +669,9 @@ class MainWindow(QMainWindow):
         self.rows.clear()
         self.seen_nodes.clear()
         self.port_counts.clear()
+        self.node_counts.clear()
+        self.node_refresh_pending = False
+        self.pending_packets.clear()
         self.table.setRowCount(0)
         self.packet_details.clear()
         self.node_table.setRowCount(0)
@@ -479,10 +724,13 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    log_path = configure_logging()
+    log.info("%s starting (Python %s, %s)", APP_NAME, platform.python_version(), platform.machine())
     theme_path = Path(__file__).resolve().parent / "dashboard.qss"
     if theme_path.is_file():
         app.setStyleSheet(theme_path.read_text(encoding="utf-8"))
     window = MainWindow()
+    window.log_path = log_path
     window.table.setAlternatingRowColors(True)
     window.show()
     sys.exit(app.exec())

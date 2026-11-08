@@ -13,6 +13,8 @@
 - Demo mode for exploring the interface without radio hardware
 - Remembered radio IP/hostname between app launches
 - Detect dropped TCP sessions and reconnect automatically with bounded backoff (up to 5 attempts); manual disconnect cancels retries
+- Session health line (uptime, packets this session, time since last packet, reconnects, last drop)
+- **Copy Diagnostics** for bug reports and a rotating log file (`~/Library/Logs/Meshtastic Sniffer TCP/app.log`, opened with **Open Log Folder**)
 - Dark, high-contrast desktop styling and read-only packet table
 
 **Known limitation:** Dropped-session detection and reconnect are tested with simulated interfaces only. Real-radio and Intel Mac hands-on verification are still required.
