@@ -30,6 +30,19 @@ STAGE="$(mktemp -d)"
 ditto "$APP" "$STAGE/$NAME.app"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "$NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+
+if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+    echo "--- signing and notarizing the disk image"
+    codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$DMG"
+    xcrun notarytool submit "$DMG" --wait \
+        --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+        || fail "notarization was not accepted"
+    xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
+    spctl -a -t open --context context:primary-signature -v "$DMG" || fail "Gatekeeper rejected the disk image"
+else
+    echo "--- no MACOS_SIGN_IDENTITY: ad-hoc signed, not notarized"
+fi
 hdiutil verify "$DMG"
 (cd dist && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
 cat "$DMG.sha256"
