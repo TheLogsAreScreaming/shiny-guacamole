@@ -6,6 +6,7 @@ that returns void. On Python 3.11 that eventually aborts the interpreter
 runs first and fails with a readable message instead. Python 3.12+ makes
 None immortal, so the check only means something on older interpreters.
 """
+import _isolation  # noqa: F401  (offscreen Qt + throwaway settings; keep first)
 import os
 import sys
 import unittest
