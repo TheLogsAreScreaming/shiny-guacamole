@@ -30,7 +30,7 @@ This app monitors packet information exposed by a Meshtastic radio over Wi-Fi/TC
 ## Release gate
 - [ ] Resolve critical bugs and document remaining limitations
 - [ ] Verify app bundle architecture and contents
-- [ ] Decide signing/notarization status and clearly disclose if unsigned
+- [ ] Add the Apple secrets in [NOTARIZATION.md](NOTARIZATION.md) and confirm `status: Accepted`, or clearly disclose that the build is not notarized
 - [ ] Replace or confirm the README screenshots against the release build
 - [ ] Publish only after explicit approval, to `TheLogsAreScreaming/shiny-guacamole-releases` (not the source repo)
 

@@ -26,6 +26,9 @@ pyz = PYZ(analysis.pure)
 exe = EXE(
     pyz, analysis.scripts, [], exclude_binaries=True,
     name=APP_NAME, console=False, target_arch="x86_64",
+    # Unset means ad-hoc signing; a Developer ID also turns on hardened runtime.
+    codesign_identity=os.environ.get("MACOS_SIGN_IDENTITY") or None,
+    entitlements_file=str(ROOT / "packaging" / "entitlements.plist"),
 )
 collected = COLLECT(exe, analysis.binaries, analysis.datas, name=APP_NAME)
 app = BUNDLE(

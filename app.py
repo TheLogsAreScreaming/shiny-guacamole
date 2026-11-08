@@ -862,7 +862,8 @@ class MainWindow(QMainWindow):
             f"<b>{APP_NAME}</b><br>Version {__version__}<br><br>"
             "Receive-focused Meshtastic packet monitor for Intel Macs. It shows what your "
             "connected radio reports over Wi-Fi/TCP; it is not an over-the-air sniffer.<br><br>"
-            "Independent community software; not affiliated with the Meshtastic project."
+            "Independent community software; not affiliated with the Meshtastic project. "
+            "Licensed under GPL-3.0."
         )
 
     def show_about(self):
