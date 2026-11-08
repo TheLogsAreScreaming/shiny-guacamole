@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from app_version import __version__
 from PySide6.QtCore import QThread, Signal, QTimer, QSettings, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
@@ -79,6 +80,12 @@ def write_packets_csv(path, rows):
 
 
 SETTINGS_ENV = "MESHTASTIC_SNIFFER_SETTINGS"
+
+
+def resource_path(name):
+    """Locate a file shipped next to app.py, or inside the packaged app."""
+    base = getattr(sys, "_MEIPASS", None) or Path(__file__).resolve().parent
+    return Path(base) / name
 
 
 def open_settings():
@@ -670,6 +677,7 @@ class MainWindow(QMainWindow):
     def diagnostics_report(self):
         lines = [
             f"{APP_NAME} diagnostics",
+            f"Version: {__version__}",
             f"Generated: {datetime.now().isoformat(timespec='seconds')}",
             f"macOS/platform: {platform.platform()} ({platform.machine()})",
             f"Python: {platform.python_version()}",
@@ -849,6 +857,17 @@ class MainWindow(QMainWindow):
         self.clear_log()
         return True
 
+    def about_text(self):
+        return (
+            f"<b>{APP_NAME}</b><br>Version {__version__}<br><br>"
+            "Receive-focused Meshtastic packet monitor for Intel Macs. It shows what your "
+            "connected radio reports over Wi-Fi/TCP; it is not an over-the-air sniffer.<br><br>"
+            "Independent community software; not affiliated with the Meshtastic project."
+        )
+
+    def show_about(self):
+        QMessageBox.about(self, "About " + APP_NAME, self.about_text())
+
     def focus_filter(self):
         self.filter_input.setFocus()
         self.filter_input.selectAll()
@@ -918,6 +937,7 @@ class MainWindow(QMainWindow):
         self.pause_action = action(view_menu, "Pause Auto-scroll", self.toggle_pause, "Ctrl+Shift+P", checkable=True)
 
         help_menu = bar.addMenu("&Help")
+        action(help_menu, "About Meshtastic Sniffer TCP", self.show_about)
         action(help_menu, "Open Log Folder", self.open_log_folder)
 
     def closeEvent(self, event):
@@ -934,15 +954,39 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def load_theme(app):
+    theme_path = resource_path("dashboard.qss")
+    if not theme_path.is_file():
+        log.warning("Theme file not found at %s", theme_path)
+        return False
+    app.setStyleSheet(theme_path.read_text(encoding="utf-8"))
+    return True
+
+
+def self_check():
+    """Prove a packaged build has everything it needs. Opens no window and no connection."""
+    import meshtastic.tcp_interface  # noqa: F401  (imported lazily in normal use)
+    from pubsub import pub  # noqa: F401
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    if not load_theme(app):
+        print("self-check failed: theme missing", file=sys.stderr)
+        return 1
+    MainWindow()
+    print(f"self-check ok: {APP_NAME} {__version__}, PySide6 {package_version('PySide6')}, meshtastic {package_version('meshtastic')}")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--self-check" in sys.argv:
+        sys.exit(self_check())
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
     log_path = configure_logging()
-    log.info("%s starting (Python %s, %s)", APP_NAME, platform.python_version(), platform.machine())
-    theme_path = Path(__file__).resolve().parent / "dashboard.qss"
-    if theme_path.is_file():
-        app.setStyleSheet(theme_path.read_text(encoding="utf-8"))
+    log.info("%s %s starting (Python %s, %s)", APP_NAME, __version__, platform.python_version(), platform.machine())
+    load_theme(app)
     window = MainWindow()
     window.log_path = log_path
-    window.table.setAlternatingRowColors(True)
     window.show()
     sys.exit(app.exec())

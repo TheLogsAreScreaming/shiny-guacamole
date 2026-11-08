@@ -47,8 +47,8 @@ Pressing Return in the address field also connects.
 
 1. Open [GitHub Actions](../../actions/workflows/intel-mac.yml) and select a successful **Intel Mac app build**.
 2. Download the **Meshtastic-Sniffer-TCP-Intel** artifact and extract it.
-3. Open the DMG and launch **Meshtastic Sniffer TCP.app**. The build is currently unsigned, so macOS may require **Control-click → Open** and approval in **System Settings → Privacy & Security**.
-4. Enter the radio's reachable LAN IP address and select **Connect TCP**, or select **Demo Mode** to inspect simulated traffic.
+3. Open the DMG and drag **Meshtastic Sniffer TCP.app** to **Applications**. The build is not signed with a Developer ID or notarized, so macOS may require **Control-click → Open** and approval in **System Settings → Privacy & Security**.
+4. Enter the radio's reachable LAN IP address and select **Connect TCP**, or select **Demo Mode** to inspect simulated traffic. On macOS 15 or later, allow **Local Network** access when asked; if you declined, turn it on in **System Settings → Privacy & Security → Local Network**.
 
 GitHub Actions packaging success is not proof that the app connects to a physical radio. No official release is published by these workflows.
 
