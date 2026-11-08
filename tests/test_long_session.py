@@ -1,4 +1,5 @@
 """Long-session stability and diagnostics regression tests (offscreen)."""
+import _isolation  # noqa: F401  (offscreen Qt + throwaway settings; keep first)
 import logging
 import os
 import random

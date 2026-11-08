@@ -6,14 +6,16 @@ This app monitors packet information exposed by a Meshtastic radio over Wi-Fi/TC
 - [ ] Python checks pass on the target commit
 - [ ] Intel Mac x86_64 packaging workflow passes
 - [ ] Download the actual .app and .dmg artifacts from the same commit
-- [ ] Run demo screenshot workflow and review its generated PNG
+- [ ] Re-capture screenshots if the UI changed (`python scripts/capture_screenshot.py`) and review them
 - [ ] Confirm README matches the current UI and features
 
 ## Manual Intel Mac gate (not verified by CI)
 - [ ] Launch the downloaded .app on a physical Intel Mac
 - [ ] Confirm macOS unsigned-app first-open instructions work
 - [ ] Run demo mode; verify packet counts, node activity, search, details, and CSV exports
-- [ ] Verify clear-log, selection, copy-node and filtered CSV behavior
+- [ ] Verify clear-log confirmation, selection, copy-node and filtered CSV behavior
+- [ ] Open an exported CSV in Numbers or Excel; dates, negative RSSI/SNR and node IDs look right
+- [ ] Try each keyboard shortcut in the README and the menu bar items
 - [ ] Connect to a real Meshtastic radio over LAN TCP, typically port 4403
 - [ ] Confirm live packets, metadata, disconnect, and reconnect behavior
 - [ ] Interrupt Wi-Fi/network and verify whether an established TCP session detects loss
@@ -26,7 +28,7 @@ This app monitors packet information exposed by a Meshtastic radio over Wi-Fi/TC
 - [ ] Resolve critical bugs and document remaining limitations
 - [ ] Verify app bundle architecture and contents
 - [ ] Decide signing/notarization status and clearly disclose if unsigned
-- [ ] Commit approved screenshots and embed them in README
+- [ ] Replace or confirm the README screenshots against the release build
 - [ ] Publish a tagged GitHub release only after explicit approval
 
 No automated workflow run proves real radio connectivity or physical Mac compatibility.

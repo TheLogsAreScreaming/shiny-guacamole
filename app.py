@@ -1,5 +1,6 @@
 import csv
 import logging
+import os
 import platform
 from collections import deque
 from logging.handlers import RotatingFileHandler
@@ -12,18 +13,21 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal, QTimer, QSettings, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QSplitter, QTextEdit,
+    QStatusBar,
 )
 
 
 def packet_row(packet):
     decoded = packet.get("decoded") or {}
+    now = datetime.now()
     return {
-        "time": datetime.now().strftime("%H:%M:%S"),
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S"),
         "from": str(packet.get("fromId") or packet.get("from") or ""),
         "type": str(decoded.get("portnum") or ""),
         "rssi": str(packet.get("rxRssi") if packet.get("rxRssi") is not None else ""),
@@ -33,6 +37,60 @@ def packet_row(packet):
 
 APP_NAME = "Meshtastic Sniffer TCP"
 log = logging.getLogger("sniffer")
+
+CSV_FIELDS = ["date", "time", "from", "type", "rssi", "snr"]
+TABLE_FIELDS = ("time", "from", "type", "rssi", "snr")
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value):
+    """Stop spreadsheet apps from running a cell as a formula.
+
+    Text that starts with =, +, - or @ is prefixed with an apostrophe; plain
+    numbers such as an RSSI of -80 are left as they are.
+    """
+    text = "" if value is None else str(value)
+    if text.startswith(_FORMULA_PREFIXES):
+        try:
+            float(text)
+        except ValueError:
+            return "'" + text
+    return text
+
+
+def write_packets_csv(path, rows):
+    """Write packets to CSV via a temporary file, so a failure never leaves a partial export."""
+    path = Path(path)
+    temp = path.with_name(f".{path.name}.partial")
+    try:
+        with open(temp, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(CSV_FIELDS)
+            for row in rows:
+                writer.writerow([csv_safe(row.get(key, "")) for key in CSV_FIELDS])
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        raise
+    return len(rows)
+
+
+SETTINGS_ENV = "MESHTASTIC_SNIFFER_SETTINGS"
+
+
+def open_settings():
+    """App preferences; tests and scripts point SETTINGS_ENV at a scratch .ini file."""
+    path = os.environ.get(SETTINGS_ENV)
+    if path:
+        return QSettings(path, QSettings.Format.IniFormat)
+    return QSettings('BaconDisk22', 'MeshtasticSnifferTCP')
+
+
+def default_export_name(stem, now=None):
+    return f"{stem}-{(now or datetime.now()).strftime('%Y%m%d-%H%M')}.csv"
 
 
 def default_log_dir():
@@ -221,7 +279,7 @@ class MainWindow(QMainWindow):
         self.radio_factory = radio_factory or RadioThread
         self.setWindowTitle("Meshtastic Sniffer TCP — Intel Mac")
         self.resize(900, 520)
-        self.settings = QSettings('BaconDisk22', 'MeshtasticSnifferTCP')
+        self.settings = open_settings()
         self.max_packets = 5000
         self.display_paused = False
         self.rows = []
@@ -266,58 +324,81 @@ class MainWindow(QMainWindow):
         self.demo = QTimer(self)
         self.demo.timeout.connect(self.demo_packet)
 
+        self.visible_count = 0
+        self.ask_save_path = self._ask_save_path
+        self.confirm = self._confirm
+
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        controls = QHBoxLayout()
+
+        connection_row = QHBoxLayout()
         self.host = QLineEdit()
         self.host.setPlaceholderText("Radio IP address (e.g. 192.168.1.50)")
         self.host.setText(self.settings.value("radio_host", "", type=str))
+        self.host.returnPressed.connect(self.connect_radio)
         self.connect_btn = QPushButton("Connect TCP")
         self.connect_btn.clicked.connect(self.connect_radio)
         self.disconnect_btn = QPushButton("Disconnect")
         self.disconnect_btn.clicked.connect(self.disconnect_radio)
         self.demo_btn = QPushButton("Demo Mode")
         self.demo_btn.clicked.connect(self.toggle_demo)
-        self.pause_btn = QPushButton("Pause Display")
-        self.pause_btn.clicked.connect(self.toggle_pause)
-        clear_btn = QPushButton("Clear Log")
-        clear_btn.clicked.connect(self.clear_log)
-        visible_export_btn = QPushButton("Export Filtered CSV")
-        visible_export_btn.clicked.connect(self.export_filtered_csv)
-        export_btn = QPushButton("Export CSV")
-        export_btn.clicked.connect(self.export_csv)
-        for item in (self.host, self.connect_btn, self.disconnect_btn, self.demo_btn, self.pause_btn, clear_btn, export_btn, visible_export_btn):
-            controls.addWidget(item)
-        layout.addLayout(controls)
-        self.status = QLabel("● Disconnected")
+        connection_row.addWidget(self.host, 1)
+        for item in (self.connect_btn, self.disconnect_btn, self.demo_btn):
+            connection_row.addWidget(item)
+        layout.addLayout(connection_row)
+
+        self.status = QLabel()
+        self.status.setObjectName("connectionStatus")
         layout.addWidget(self.status)
         self.stats = QLabel("Packets: 0  |  Nodes: 0  |  Message types: 0")
+        self.stats.setObjectName("stats")
         layout.addWidget(self.stats)
         self.diagnostics = QLabel()
         self.diagnostics.setObjectName("diagnostics")
         self.diagnostics.setWordWrap(True)
         layout.addWidget(self.diagnostics)
+
+        log_row = QHBoxLayout()
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText("Filter packets by node ID or message type...")
+        self.filter_input.setClearButtonEnabled(True)
         self.filter_input.textChanged.connect(self.apply_filter)
-        layout.addWidget(self.filter_input)
+        self.pause_btn = QPushButton("Pause Auto-scroll")
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.clear_btn = QPushButton("Clear Log")
+        self.clear_btn.clicked.connect(self.confirm_clear_log)
+        self.export_btn = QPushButton("Export CSV")
+        self.export_btn.clicked.connect(self.export_csv)
+        self.export_filtered_btn = QPushButton("Export Filtered")
+        self.export_filtered_btn.clicked.connect(self.export_filtered_csv)
+        log_row.addWidget(self.filter_input, 1)
+        for item in (self.pause_btn, self.clear_btn, self.export_btn, self.export_filtered_btn):
+            log_row.addWidget(item)
+        layout.addLayout(log_row)
+
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Time", "From", "Port", "RSSI", "SNR"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setStretchLastSection(True)
+        for column, width in ((0, 90), (1, 120), (2, 190), (3, 70)):
+            self.table.setColumnWidth(column, width)
         self.packet_details = QTextEdit()
         self.packet_details.setReadOnly(True)
         self.packet_details.setPlaceholderText("Select a packet to inspect its available metadata")
-        self.packet_details.setMaximumHeight(110)
+        self.packet_details.setMaximumHeight(120)
         self.table.itemSelectionChanged.connect(self.show_packet_details)
         self.node_table = QTableWidget(0, 2)
         self.node_table.setHorizontalHeaderLabels(["Node ID", "Packets"])
         self.node_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.node_table.verticalHeader().setVisible(False)
         self.node_table.horizontalHeader().setStretchLastSection(True)
+        self.node_table.setColumnWidth(0, 120)
         self.node_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.node_table.setToolTip("Double-click a node to filter the packet log by it")
         self.copy_node_btn = QPushButton("Copy Selected Node ID")
         self.copy_node_btn.clicked.connect(self.copy_selected_node)
         self.node_table.cellDoubleClicked.connect(self.filter_by_node)
@@ -326,7 +407,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.node_table)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
         layout.addWidget(self.packet_details)
         bottom = QHBoxLayout()
         self.copy_diagnostics_btn = QPushButton("Copy Diagnostics")
@@ -335,7 +416,12 @@ class MainWindow(QMainWindow):
         self.open_logs_btn.clicked.connect(self.open_log_folder)
         for item in (self.copy_node_btn, self.copy_diagnostics_btn, self.open_logs_btn):
             bottom.addWidget(item)
+        bottom.addStretch(1)
         layout.addLayout(bottom)
+        self.setStatusBar(QStatusBar())
+        self._build_menus()
+        self.set_status("● Disconnected", "offline")
+        self.update_controls()
         self.refresh_diagnostics()
 
     def _count_packet(self, data, delta):
@@ -357,7 +443,10 @@ class MainWindow(QMainWindow):
             self.port_counts.pop(kind, None)
 
     def _update_stats(self):
-        self.stats.setText(f"Packets: {len(self.rows)}  |  Nodes: {len(self.seen_nodes)}  |  Message types: {len(self.port_counts)}")
+        text = f"Packets: {len(self.rows)}  |  Nodes: {len(self.seen_nodes)}  |  Message types: {len(self.port_counts)}"
+        if self.filter_input.text().strip():
+            text += f"  |  Showing {self.visible_count} of {len(self.rows)}"
+        self.stats.setText(text)
 
     def _row_matches_filter(self, packet, query):
         if not query:
@@ -374,16 +463,22 @@ class MainWindow(QMainWindow):
         self.last_packet_at = time.monotonic()
         if len(self.rows) > self.max_packets:
             self._count_packet(self.rows.pop(0), -1)
+            if not self.table.isRowHidden(0):
+                self.visible_count -= 1
             self.table.removeRow(0)
             self.packet_details.clear()
-        self._update_stats()
         row = self.table.rowCount()
         self.table.insertRow(row)
-        for col, key in enumerate(("time", "from", "type", "rssi", "snr")):
+        for col, key in enumerate(TABLE_FIELDS):
             self.table.setItem(row, col, QTableWidgetItem(data.get(key, "")))
         query = self.filter_input.text().strip().casefold()
-        if query:
-            self.table.setRowHidden(row, not self._row_matches_filter(data, query))
+        if query and not self._row_matches_filter(data, query):
+            self.table.setRowHidden(row, True)
+        else:
+            self.visible_count += 1
+        self._update_stats()
+        if len(self.rows) == 1:
+            self.update_controls()
         self.schedule_node_refresh()
         if self.table.currentRow() >= 0:
             self.show_packet_details()
@@ -434,7 +529,7 @@ class MainWindow(QMainWindow):
             self.node_refresh_timer.start()
 
     def on_radio_status(self, message):
-        self.status.setText(message)
+        self.set_status(message, "connected" if message.startswith("● Connected") else self.status_state)
 
     def record_event(self, message, level=logging.INFO):
         """Remember a connection event for Copy Diagnostics and write it to the log."""
@@ -455,7 +550,6 @@ class MainWindow(QMainWindow):
         radio = self.sender()
         if radio is self.radio:
             self.radio = None
-            self.connect_btn.setEnabled(True)
             reason = getattr(radio, "end_reason", "stopped")
             detail = getattr(radio, "end_detail", "")
             self.session_started = None
@@ -468,9 +562,10 @@ class MainWindow(QMainWindow):
             if reason in ("failed", "lost") and self.reconnect_enabled:
                 self._schedule_reconnect(reason, detail)
             elif reason == "failed":
-                self.status.setText("✕ Connection failed: " + detail)
+                self.set_status("✕ Connection failed: " + detail, "error")
             elif not self.demo.isActive():
-                self.status.setText("● Disconnected")
+                self.set_status("● Disconnected", "offline")
+            self.update_controls()
         radio.deleteLater()
 
     def _schedule_reconnect(self, reason, detail):
@@ -481,25 +576,28 @@ class MainWindow(QMainWindow):
         if self.retry_count > self.max_retries:
             self.reconnect_enabled = False
             self.record_event(f"Gave up reconnecting after {self.max_retries} attempts", logging.WARNING)
-            self.status.setText(
+            self.set_status(
                 f"✕ {label}: {detail} — gave up after {self.max_retries} attempts. "
-                "Select Connect TCP to try again."
+                "Select Connect TCP to try again.",
+                "error",
             )
             return
         delay = reconnect_delay_ms(self.retry_count)
         self.retry_timer.start(delay)
         self.record_event(f"Reconnect attempt {self.retry_count}/{self.max_retries} in {delay // 1000}s")
-        self.status.setText(
+        self.set_status(
             f"◌ {label}: {detail} — reconnecting in {delay // 1000}s "
-            f"(attempt {self.retry_count}/{self.max_retries})"
+            f"(attempt {self.retry_count}/{self.max_retries})",
+            "warning",
         )
 
     def _retry_connect(self):
         if self.reconnect_enabled and self.radio is None and self.reconnect_host:
             self._start_radio(self.reconnect_host)
-            self.status.setText(
+            self.set_status(
                 f"◌ Reconnecting to {self.reconnect_host} "
-                f"(attempt {self.retry_count}/{self.max_retries})..."
+                f"(attempt {self.retry_count}/{self.max_retries})...",
+                "connecting",
             )
 
     def connect_radio(self):
@@ -508,7 +606,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing address", "Enter your radio IP address.")
             return
         if self.radio is not None:
-            self.status.setText("Disconnect the current radio before connecting again.")
+            self.notify("Disconnect the current radio before connecting again.")
             return
         self.retry_count = 0
         self.has_connected = False
@@ -527,10 +625,10 @@ class MainWindow(QMainWindow):
         self.radio.status.connect(self.on_radio_status)
         self.radio.connected.connect(self._on_radio_connected)
         self.radio.finished.connect(self._radio_finished)
-        self.connect_btn.setEnabled(False)
-        self.status.setText("◌ Connecting to radio...")
+        self.set_status(f"◌ Connecting to {host}...", "connecting")
         self.record_event("Connecting to " + host)
         self.radio.start()
+        self.update_controls()
 
     def disconnect_radio(self):
         self.reconnect_enabled = False
@@ -540,9 +638,10 @@ class MainWindow(QMainWindow):
             self.record_event("Disconnect requested by user")
         if self.radio is not None:
             self.radio.stop()
-            self.status.setText("◌ Disconnecting...")
+            self.set_status("◌ Disconnecting...", "connecting")
         elif not self.demo.isActive():
-            self.status.setText("● Disconnected")
+            self.set_status("● Disconnected", "offline")
+        self.update_controls()
 
     def session_summary(self):
         """One-line health summary for the live connection (empty when idle)."""
@@ -588,7 +687,7 @@ class MainWindow(QMainWindow):
 
     def copy_diagnostics(self):
         QApplication.clipboard().setText(self.diagnostics_report())
-        self.status.setText("Copied diagnostics to clipboard")
+        self.notify("Copied diagnostics to clipboard")
 
     def open_log_folder(self):
         if self.log_path is None:
@@ -599,19 +698,23 @@ class MainWindow(QMainWindow):
     def toggle_demo(self):
         if self.demo.isActive():
             self.demo.stop()
-            self.status.setText("Disconnected")
+            self.set_status("● Disconnected", "offline")
+            self.update_controls()
             return
         if self.radio is not None:
-            self.status.setText("Disconnect the radio before starting demo mode.")
+            self.notify("Disconnect the radio before starting demo mode.")
             return
         self.reconnect_enabled = False
         self.retry_timer.stop()
         self.demo.start(1200)
-        self.status.setText("● Demo mode — simulated packets")
+        self.set_status("● Demo mode — simulated packets", "demo")
+        self.update_controls()
 
     def demo_packet(self):
+        now = datetime.now()
         self.add_packet({
-            "time": datetime.now().strftime("%H:%M:%S"),
+            "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H:%M:%S"),
             "from": random.choice(self.demo_nodes),
             "type": random.choice(["TEXT_MESSAGE_APP", "POSITION_APP", "NODEINFO_APP"]),
             "rssi": str(random.randint(-120, -45)),
@@ -622,7 +725,8 @@ class MainWindow(QMainWindow):
         index = self.table.currentRow()
         if 0 <= index < len(self.rows):
             packet = self.rows[index]
-            self.packet_details.setPlainText("\n".join(f"{key}: {packet.get(key, '')}" for key in ("time", "from", "type", "rssi", "snr")))
+            keys = CSV_FIELDS if packet.get("date") else TABLE_FIELDS
+            self.packet_details.setPlainText("\n".join(f"{key}: {packet.get(key, '')}" for key in keys))
         else:
             self.packet_details.clear()
 
@@ -636,7 +740,7 @@ class MainWindow(QMainWindow):
         item = self.node_table.item(row, 0) if row >= 0 else None
         if item is not None:
             QApplication.clipboard().setText(item.text())
-            self.status.setText("Copied node ID: " + item.text())
+            self.notify("Copied node ID: " + item.text())
 
     def refresh_nodes(self):
         self.node_refresh_pending = False
@@ -656,12 +760,23 @@ class MainWindow(QMainWindow):
 
     def apply_filter(self):
         query = self.filter_input.text().strip().casefold()
-        for index, packet in enumerate(self.rows):
-            self.table.setRowHidden(index, not self._row_matches_filter(packet, query))
+        visible = 0
+        self.table.setUpdatesEnabled(False)
+        try:
+            for index, packet in enumerate(self.rows):
+                matches = self._row_matches_filter(packet, query)
+                self.table.setRowHidden(index, not matches)
+                visible += matches
+        finally:
+            self.table.setUpdatesEnabled(True)
+        self.visible_count = visible
+        self._update_stats()
+        self.update_controls()
 
     def toggle_pause(self):
         self.display_paused = not self.display_paused
-        self.pause_btn.setText("Resume Auto-scroll" if self.display_paused else "Pause Display")
+        self.pause_btn.setText("Resume Auto-scroll" if self.display_paused else "Pause Auto-scroll")
+        self.pause_action.setChecked(self.display_paused)
         if not self.display_paused:
             self.table.scrollToBottom()
 
@@ -675,38 +790,135 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.packet_details.clear()
         self.node_table.setRowCount(0)
-        self.stats.setText("Packets: 0  |  Nodes: 0  |  Message types: 0")
+        self.visible_count = 0
+        self._update_stats()
+        self.update_controls()
+
+    def visible_rows(self):
+        return [packet for index, packet in enumerate(self.rows) if not self.table.isRowHidden(index)]
 
     def export_filtered_csv(self):
-        visible = [packet for index, packet in enumerate(self.rows) if not self.table.isRowHidden(index)]
-        path, _ = QFileDialog.getSaveFileName(self, "Export filtered packet log", str(Path.home() / "meshtastic-filtered-packets.csv"), "CSV files (*.csv)")
-        if not path:
-            return
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as file:
-                writer = csv.DictWriter(file, fieldnames=["time", "from", "type", "rssi", "snr"])
-                writer.writeheader()
-                writer.writerows(visible)
-        except OSError as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
-        else:
-            self.status.setText(f"Exported {len(visible)} filtered packets")
+        return self._export(self.visible_rows(), "Export filtered packet log", "meshtastic-filtered-packets", "filtered packets")
 
     def export_csv(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export packet log",
-            str(Path.home() / "meshtastic-packets.csv"), "CSV files (*.csv)"
+        return self._export(list(self.rows), "Export packet log", "meshtastic-packets", "packets")
+
+    def _export(self, rows, title, stem, noun):
+        """Ask where to save, write the CSV, and report the result. Returns the path or None."""
+        if not rows:
+            self.notify(f"No {noun} to export.")
+            return None
+        folder = self.settings.value("export_dir", "", type=str)
+        if not folder or not Path(folder).is_dir():
+            folder = str(Path.home())
+        path = self.ask_save_path(title, str(Path(folder) / default_export_name(stem)))
+        if not path:
+            return None
+        path = Path(path)
+        if not path.suffix:
+            path = path.with_suffix(".csv")
+        try:
+            count = write_packets_csv(path, rows)
+        except OSError as exc:
+            log.warning("CSV export to %s failed: %s", path, exc)
+            QMessageBox.critical(self, "Export failed", f"Could not write {path.name}:\n{exc}")
+            return None
+        self.settings.setValue("export_dir", str(path.parent))
+        log.info("Exported %d %s to %s", count, noun, path)
+        self.notify(f"Exported {count} {noun} to {path.name}")
+        return path
+
+    def _ask_save_path(self, title, default):
+        path, _ = QFileDialog.getSaveFileName(self, title, default, "CSV files (*.csv)")
+        return path
+
+    def _confirm(self, title, text):
+        answer = QMessageBox.question(
+            self, title, text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
         )
-        if path:
-            try:
-                with open(path, "w", newline="", encoding="utf-8") as file:
-                    writer = csv.DictWriter(file, fieldnames=["time", "from", "type", "rssi", "snr"])
-                    writer.writeheader()
-                    writer.writerows(self.rows)
-            except OSError as exc:
-                QMessageBox.critical(self, "Export failed", str(exc))
-            else:
-                self.status.setText(f"Exported {len(self.rows)} packets to CSV")
+        return answer == QMessageBox.StandardButton.Yes
+
+    def confirm_clear_log(self):
+        if self.rows and not self.confirm(
+            "Clear packet log?",
+            f"Remove all {len(self.rows)} packets from the log? Export first if you need them.",
+        ):
+            return False
+        self.clear_log()
+        return True
+
+    def focus_filter(self):
+        self.filter_input.setFocus()
+        self.filter_input.selectAll()
+
+    def set_status(self, text, state):
+        """Show the connection state; the stylesheet colours it by state."""
+        self.status_state = state
+        self.status.setText(text)
+        self.status.setProperty("state", state)
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
+
+    def notify(self, message, timeout=6000):
+        """Show a short-lived message without overwriting the connection state."""
+        self.statusBar().showMessage(message, timeout)
+
+    def update_controls(self):
+        busy = self.radio is not None or self.retry_timer.isActive()
+        demo = self.demo.isActive()
+        self.connect_btn.setEnabled(not busy and not demo)
+        self.host.setEnabled(not busy)
+        self.disconnect_btn.setEnabled(busy)
+        self.demo_btn.setEnabled(not busy)
+        self.demo_btn.setText("Stop Demo" if demo else "Demo Mode")
+        has_rows = bool(self.rows)
+        self.export_btn.setEnabled(has_rows)
+        self.export_filtered_btn.setEnabled(has_rows and bool(self.filter_input.text().strip()))
+        self.clear_btn.setEnabled(has_rows)
+        for action, enabled in (
+            (self.connect_action, self.connect_btn.isEnabled()),
+            (self.disconnect_action, busy),
+            (self.export_action, self.export_btn.isEnabled()),
+            (self.export_filtered_action, self.export_filtered_btn.isEnabled()),
+        ):
+            action.setEnabled(enabled)
+
+    def _build_menus(self):
+        def action(menu, text, slot, shortcut=None, checkable=False):
+            item = QAction(text, self)
+            if shortcut is not None:
+                item.setShortcut(QKeySequence(shortcut))
+            item.setCheckable(checkable)
+            item.triggered.connect(slot)
+            menu.addAction(item)
+            return item
+
+        bar = self.menuBar()
+        file_menu = bar.addMenu("&File")
+        self.export_action = action(file_menu, "Export CSV…", self.export_csv, "Ctrl+E")
+        self.export_filtered_action = action(file_menu, "Export Filtered CSV…", self.export_filtered_csv, "Ctrl+Shift+E")
+        file_menu.addSeparator()
+        action(file_menu, "Quit", self.close, QKeySequence.StandardKey.Quit)
+
+        edit_menu = bar.addMenu("&Edit")
+        action(edit_menu, "Find Packets", self.focus_filter, QKeySequence.StandardKey.Find)
+        action(edit_menu, "Copy Selected Node ID", self.copy_selected_node)
+        action(edit_menu, "Copy Diagnostics", self.copy_diagnostics)
+        edit_menu.addSeparator()
+        action(edit_menu, "Clear Log…", self.confirm_clear_log, "Ctrl+Shift+K")
+
+        radio_menu = bar.addMenu("&Radio")
+        self.connect_action = action(radio_menu, "Connect", self.connect_radio, "Ctrl+K")
+        self.disconnect_action = action(radio_menu, "Disconnect", self.disconnect_radio, "Ctrl+Shift+D")
+        action(radio_menu, "Demo Mode", self.toggle_demo)
+
+        view_menu = bar.addMenu("&View")
+        self.pause_action = action(view_menu, "Pause Auto-scroll", self.toggle_pause, "Ctrl+Shift+P", checkable=True)
+
+        help_menu = bar.addMenu("&Help")
+        action(help_menu, "Open Log Folder", self.open_log_folder)
 
     def closeEvent(self, event):
         self.reconnect_enabled = False
@@ -717,7 +929,7 @@ class MainWindow(QMainWindow):
             self.radio.stop()
             if not self.radio.wait(5000):
                 event.ignore()
-                self.status.setText("Waiting for TCP connection to close; please try again.")
+                self.notify("Waiting for the TCP connection to close; please try again.")
                 return
         super().closeEvent(event)
 

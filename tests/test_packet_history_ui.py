@@ -1,4 +1,5 @@
 """Offscreen UI regression tests for the bounded packet window."""
+import _isolation  # noqa: F401  (offscreen Qt + throwaway settings; keep first)
 import os
 import unittest
 

@@ -6,3 +6,27 @@ QPushButton:hover { background: #31648a; }
 QPushButton:disabled { color: #b5bec7; background: #39434c; }
 QTableWidget { background: #162331; alternate-background-color: #1c3042; color: #f5f8fc; gridline-color: #43566a; selection-background-color: #28658d; }
 QHeaderView::section { background: #253c50; color: #ffffff; padding: 8px; font-weight: bold; }
+QLineEdit:disabled { background: #1b2733; color: #b5bec7; border-color: #43566a; }
+QTextEdit { background: #162331; color: #f5f8fc; border: 1px solid #43566a; border-radius: 6px; padding: 4px; }
+QSplitter::handle { background: #2b3e52; width: 4px; }
+QLabel#connectionStatus { font-weight: 600; border-radius: 6px; padding: 6px 10px; background: #1b2733; border-left: 4px solid #8b9aa8; }
+QLabel#connectionStatus[state="connected"] { border-left-color: #3ecf8e; color: #c9f5e1; }
+QLabel#connectionStatus[state="connecting"] { border-left-color: #5cb8ff; color: #d4ecff; }
+QLabel#connectionStatus[state="warning"] { border-left-color: #f2b84b; color: #fde9c2; }
+QLabel#connectionStatus[state="error"] { border-left-color: #ff6b6b; color: #ffd6d6; }
+QLabel#connectionStatus[state="demo"] { border-left-color: #b48cff; color: #e6dbff; }
+QLabel#stats { color: #c3d2df; }
+QLabel#diagnostics { color: #a9bccd; font-size: 12px; }
+QStatusBar { background: #0c131b; color: #c3d2df; }
+QMenuBar { background: #0c131b; color: #eaf2f9; }
+QMenuBar::item:selected, QMenu::item:selected { background: #28658d; }
+QMenu { background: #162331; color: #eaf2f9; border: 1px solid #43566a; }
+QToolTip { background: #243345; color: #ffffff; border: 1px solid #6e879d; }
+QTableWidget::item { padding: 0 6px; }
+QScrollBar:vertical { background: #111923; width: 12px; margin: 0; }
+QScrollBar:horizontal { background: #111923; height: 12px; margin: 0; }
+QScrollBar::handle:vertical { background: #43566a; border-radius: 5px; min-height: 24px; margin: 2px; }
+QScrollBar::handle:horizontal { background: #43566a; border-radius: 5px; min-width: 24px; margin: 2px; }
+QScrollBar::handle:hover { background: #5c7891; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }

@@ -4,6 +4,7 @@ These use a fake pubsub bus and a fake Meshtastic interface, so they run in CI
 without the meshtastic package or a physical radio. They prove the app-side
 lifecycle only; network loss on real hardware still needs a hands-on test.
 """
+import _isolation  # noqa: F401  (offscreen Qt + throwaway settings; keep first)
 import os
 import socket
 import threading

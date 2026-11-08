@@ -15,6 +15,7 @@ import os
 import random
 import resource
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -38,6 +39,8 @@ def main():
     args = parser.parse_args()
     if args.offscreen:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    # Keep the soak run's window from saving into the installed app's preferences.
+    os.environ.setdefault("MESHTASTIC_SNIFFER_SETTINGS", os.path.join(tempfile.mkdtemp(), "settings.ini"))
 
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication

@@ -1,4 +1,5 @@
 """Regression tests for Meshtastic packet metadata normalization."""
+import _isolation  # noqa: F401  (offscreen Qt + throwaway settings; keep first)
 import unittest
 
 from app import packet_row
