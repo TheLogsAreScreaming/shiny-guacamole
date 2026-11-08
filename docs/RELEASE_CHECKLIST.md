@@ -5,13 +5,16 @@ This app monitors packet information exposed by a Meshtastic radio over Wi-Fi/TC
 ## Automated gate
 - [ ] Python checks pass on the target commit
 - [ ] Intel Mac x86_64 packaging workflow passes
-- [ ] Download the actual .app and .dmg artifacts from the same commit
+- [ ] `app_version.py` and `CHANGELOG.md` are updated for this release
+- [ ] Download the actual .dmg and .sha256 artifacts from the same commit; `shasum -a 256 -c` passes
 - [ ] Re-capture screenshots if the UI changed (`python scripts/capture_screenshot.py`) and review them
 - [ ] Confirm README matches the current UI and features
 
 ## Manual Intel Mac gate (not verified by CI)
 - [ ] Launch the downloaded .app on a physical Intel Mac
 - [ ] Confirm macOS unsigned-app first-open instructions work
+- [ ] Drag to Applications from the DMG; the icon and About version are right
+- [ ] On macOS 15+, the local network prompt appears on first connect and allowing it works
 - [ ] Run demo mode; verify packet counts, node activity, search, details, and CSV exports
 - [ ] Verify clear-log confirmation, selection, copy-node and filtered CSV behavior
 - [ ] Open an exported CSV in Numbers or Excel; dates, negative RSSI/SNR and node IDs look right
@@ -29,6 +32,6 @@ This app monitors packet information exposed by a Meshtastic radio over Wi-Fi/TC
 - [ ] Verify app bundle architecture and contents
 - [ ] Decide signing/notarization status and clearly disclose if unsigned
 - [ ] Replace or confirm the README screenshots against the release build
-- [ ] Publish a tagged GitHub release only after explicit approval
+- [ ] Publish only after explicit approval, to `TheLogsAreScreaming/shiny-guacamole-releases` (not the source repo)
 
 No automated workflow run proves real radio connectivity or physical Mac compatibility.

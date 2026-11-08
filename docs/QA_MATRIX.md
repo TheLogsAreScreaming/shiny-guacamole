@@ -13,7 +13,7 @@ The GitHub Actions Python checks and Intel packaging workflow do **not** verify 
 | Demo mode | Offscreen screenshots in `docs/screenshots/` | Visual check on a real Intel Mac display |
 | Buttons, menus, status colours | Headless tests: enable/disable through connect, retry, disconnect and demo; clear-log confirmation; pause menu sync | Keyboard shortcuts and menu bar on macOS |
 | TCP connection | Fake-interface tests: loss event, dead reader, keepalive, backoff, give-up, no duplicate subscriptions | Live Wi-Fi/TCP radio, loss/recovery timing, app shutdown |
-| Intel Mac packaging | GitHub Actions artifact | Download and launch on physical Intel Mac |
+| Intel Mac packaging | `scripts/build_mac.sh` in Actions: x86_64 binary, plist version, local-network text, signature, bundled self-check (imports Meshtastic, loads theme, builds window offscreen), DMG verify | Download and launch on physical Intel Mac; Gatekeeper and local network prompts |
 
 ## Before beta
 1. Run the automated test workflow and verify the target commit.
