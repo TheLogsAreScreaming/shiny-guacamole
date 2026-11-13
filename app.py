@@ -1,4 +1,5 @@
 import csv
+import gc
 import logging
 import os
 import platform
@@ -13,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app_version import __version__
+from integrations_ui import IntegrationsDialog, integrations_dir, make_hub
 from PySide6.QtCore import QThread, Signal, QTimer, QSettings, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
@@ -203,6 +205,8 @@ class RadioThread(QThread):
         self._stop = threading.Event()
         self._lost = threading.Event()
         self._interface = None
+        # Optional callable fed every raw packet (integrations); must never raise.
+        self.packet_observer = None
         self.end_reason = "stopped"
         self.end_detail = ""
 
@@ -214,6 +218,9 @@ class RadioThread(QThread):
             return
         if self._interface is not None and interface is not None and interface is not self._interface:
             return
+        observer = self.packet_observer
+        if observer is not None:
+            observer(packet)
         self.packet.emit(packet_row(packet))
 
     def on_connection_lost(self, interface=None):
@@ -426,6 +433,8 @@ class MainWindow(QMainWindow):
         bottom.addStretch(1)
         layout.addLayout(bottom)
         self.setStatusBar(QStatusBar())
+        self.integrations = None
+        self.start_integrations()
         self._build_menus()
         self.set_status("● Disconnected", "offline")
         self.update_controls()
@@ -544,6 +553,7 @@ class MainWindow(QMainWindow):
         log.log(level, message)
 
     def _on_radio_connected(self, host):
+        self.integrations.state.set_radio(connected=True, host=host)
         if self.has_connected:
             self.reconnects += 1
         self.has_connected = True
@@ -557,6 +567,7 @@ class MainWindow(QMainWindow):
         radio = self.sender()
         if radio is self.radio:
             self.radio = None
+            self.integrations.state.set_radio(connected=False)
             reason = getattr(radio, "end_reason", "stopped")
             detail = getattr(radio, "end_detail", "")
             self.session_started = None
@@ -628,6 +639,8 @@ class MainWindow(QMainWindow):
         self.reconnect_host = host
         self.settings.setValue("radio_host", host)
         self.radio = self.radio_factory(host, self)
+        if hasattr(self.radio, "packet_observer"):
+            self.radio.packet_observer = self.integrations.observe
         self.radio.packet.connect(self.queue_packet)
         self.radio.status.connect(self.on_radio_status)
         self.radio.connected.connect(self._on_radio_connected)
@@ -866,6 +879,42 @@ class MainWindow(QMainWindow):
             "Licensed under GPL-3.0."
         )
 
+    def start_integrations(self):
+        """(Re)build webhooks / assistant link / metrics from saved settings; all off by default."""
+        if self.integrations is not None:
+            self.integrations.stop()
+        self.integrations = make_hub(self.settings)
+        if self.radio is not None and hasattr(self.radio, "packet_observer"):
+            self.radio.packet_observer = self.integrations.observe
+        try:
+            if self.integrations.settings.local_api_enabled:
+                integrations_dir().mkdir(parents=True, exist_ok=True)
+            self.integrations.start()
+        except OSError as exc:
+            log.warning("Assistant link could not start: %s", exc)
+            return f"Assistant link could not start on port {self.integrations.settings.local_api_port}: {exc}"
+        return ""
+
+    def integrations_status(self):
+        info = self.integrations.describe()
+        parts = []
+        if info["webhooks"]["enabled"]:
+            parts.append(f"Webhooks: {info['webhooks']['sent']} sent, {info['webhooks']['failed']} failed")
+        if info["local_api"]["enabled"]:
+            parts.append(f"Local link: http://127.0.0.1:{info['local_api']['port']}/metrics")
+        return " · ".join(parts) or "All integrations are off."
+
+    def open_integrations(self):
+        dialog = IntegrationsDialog(self.settings, self, self.integrations_status())
+        accepted = dialog.exec()
+        # Free the dialog on the GUI thread; never leave it for Python's GC,
+        # which may run on an integrations worker thread.
+        dialog.deleteLater()
+        if accepted:
+            problem = self.start_integrations()
+            self.record_event("Integrations settings changed")
+            self.notify(problem or self.integrations_status())
+
     def show_about(self):
         QMessageBox.about(self, "About " + APP_NAME, self.about_text())
 
@@ -933,6 +982,8 @@ class MainWindow(QMainWindow):
         self.connect_action = action(radio_menu, "Connect", self.connect_radio, "Ctrl+K")
         self.disconnect_action = action(radio_menu, "Disconnect", self.disconnect_radio, "Ctrl+Shift+D")
         action(radio_menu, "Demo Mode", self.toggle_demo)
+        radio_menu.addSeparator()
+        action(radio_menu, "Integrations…", self.open_integrations)
 
         view_menu = bar.addMenu("&View")
         self.pause_action = action(view_menu, "Pause Auto-scroll", self.toggle_pause, "Ctrl+Shift+P", checkable=True)
@@ -952,6 +1003,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 self.notify("Waiting for the TCP connection to close; please try again.")
                 return
+        self.integrations.stop()
         super().closeEvent(event)
 
 
@@ -979,6 +1031,10 @@ def self_check():
 
 
 if __name__ == "__main__":
+    if "--assistant-mcp" in sys.argv:
+        # Started by an assistant (e.g. Claude Desktop) as an MCP stdio server; no window.
+        import assistant_mcp
+        sys.exit(assistant_mcp.main(integrations_dir()))
     if "--self-check" in sys.argv:
         sys.exit(self_check())
     app = QApplication(sys.argv)
@@ -990,4 +1046,10 @@ if __name__ == "__main__":
     window = MainWindow()
     window.log_path = log_path
     window.show()
+    # Integrations run worker threads; let Python's cyclic GC run only on the
+    # GUI thread so it never frees Qt objects from a worker thread.
+    gc.disable()
+    gc_timer = QTimer()
+    gc_timer.timeout.connect(gc.collect)
+    gc_timer.start(10000)
     sys.exit(app.exec())
