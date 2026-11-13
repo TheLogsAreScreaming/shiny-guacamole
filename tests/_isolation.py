@@ -11,3 +11,7 @@ os.environ.setdefault(
     "MESHTASTIC_SNIFFER_SETTINGS",
     os.path.join(tempfile.mkdtemp(prefix="sniffer-tests-"), "settings.ini"),
 )
+os.environ.setdefault(
+    "MESHTASTIC_SNIFFER_INTEGRATIONS_DIR",
+    tempfile.mkdtemp(prefix="sniffer-integrations-"),
+)

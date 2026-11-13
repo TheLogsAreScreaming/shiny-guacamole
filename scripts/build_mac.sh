@@ -24,6 +24,15 @@ plutil -extract NSLocalNetworkUsageDescription raw "$PLIST" >/dev/null || fail "
 codesign --verify --deep "$APP" || fail "code signature does not verify"
 QT_QPA_PLATFORM=offscreen MESHTASTIC_SNIFFER_SETTINGS="$(mktemp -d)/settings.ini" "$EXE" --self-check \
     || fail "bundled app failed its self-check"
+MCP_OUT="$(printf '%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_nodes","arguments":{}}}' \
+    | MESHTASTIC_SNIFFER_INTEGRATIONS_DIR="$(mktemp -d)" "$EXE" --assistant-mcp)"
+echo "$MCP_OUT" | grep -q '"node_telemetry"' || fail "assistant link (MCP) did not list its tools"
+echo "$MCP_OUT" | grep -q 'send_message' && fail "assistant link must not offer sending"
+echo "$MCP_OUT" | grep -q 'assistant link is off' || fail "assistant link did not report the app as off"
 
 echo "--- building the disk image"
 STAGE="$(mktemp -d)"

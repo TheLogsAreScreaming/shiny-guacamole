@@ -11,3 +11,4 @@ First planned beta. Not yet tested against a physical radio.
 - CSV export of the full or filtered log, with safe cells and atomic writes
 - Menu bar, keyboard shortcuts, and colour-coded connection status
 - Versioned Intel Mac app bundle with icon, DMG, and SHA-256 checksum
+- Optional integrations, off by default: webhooks, read-only assistant link (MCP), Prometheus/InfluxDB export and a sample Grafana dashboard

@@ -18,6 +18,7 @@
 - **Copy Diagnostics** for bug reports and a rotating log file (`~/Library/Logs/Meshtastic Sniffer TCP/app.log`, opened with **Open Log Folder**)
 - Dark, high-contrast desktop styling with a colour-coded connection status (connected, connecting, retrying, failed, demo); buttons enable only when they can act
 - Menu bar with keyboard shortcuts (below); short confirmations appear in the status bar without hiding the connection state
+- Optional integrations (**Radio → Integrations…**, all off by default): webhooks for node, telemetry and text-message activity; a read-only assistant link for Claude (MCP); Prometheus `/metrics`, InfluxDB line protocol and a Grafana dashboard. Message text is never shared. See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md)
 
 **Known limitation:** Dropped-session detection and reconnect are tested with simulated interfaces only. Real-radio and Intel Mac hands-on verification are still required.
 
@@ -79,7 +80,7 @@ Tests run Qt offscreen and keep their preferences in a temporary file, so they n
 
 ## Privacy and safety
 
-The app does not intentionally transmit messages. Packet logs and CSV exports may contain node identifiers or other sensitive metadata: handle and share them responsibly. Only monitor radios and networks you are authorized to access.
+The app does not intentionally transmit messages. Integrations are off by default; when on, the local link listens on 127.0.0.1 only and webhooks go only to URLs you enter. Packet logs and CSV exports may contain node identifiers or other sensitive metadata: handle and share them responsibly. Only monitor radios and networks you are authorized to access.
 
 ## License
 
